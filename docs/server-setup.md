@@ -106,20 +106,93 @@ sudo ufw enable
 Итог (`sudo ufw status verbose`): Status active; Logging on (medium); Default: deny (incoming), allow (outgoing),
 disabled (routed); правила: 80/tcp ALLOW IN, 443/tcp ALLOW IN, 2222/tcp LIMIT IN (IPv4 и IPv6).
 
-## 7. Доменное имя
-
-- Хост (Windows): `C:\Windows\System32\drivers\etc\hosts` — `192.168.109.101   devops.local`.
-- Сервер: `/etc/hosts` — `127.0.1.1 devops-vm.devops.local devops-vm`; `hostname -f` → `devops-vm.devops.local`.
-
-## 8. Снимки состояния
+## 7. Снимки состояния
 
 | Снимок | Момент создания | Состояние |
 |---|---|---|
 | 01-clean-install | 20.10.2026 13:20 | чистая установка, `apt upgrade`, ВМ выключена |
 | 02-keys-configured | 20.10.2026 14:06 | пользователь devops в группе sudo, ключевая аутентификация, `~/.ssh/config` |
 | 03-ssh-hardened | 20.10.2026 14:11 | 99-hardening.conf, порт 2222, ssh.service, проброс 2222→2222 |
+| 04-nginx-https | 20.10.2026 | ПР6: nginx, ресурс devops-site, HTTPS с самоподписанным сертификатом, перенаправление HTTP → HTTPS |
 
-## 9. Контроль
+## 8. Веб-сервер
 
-`scripts/audit.sh` — 6 проверок (root, пароли, порт ≠ 22, MaxAuthTries = 3, UFW активен, deny incoming);
+| Параметр | Значение |
+|---|---|
+| Пакет | `nginx` (Ubuntu 24.04, nginx/1.24.0), служба `nginx.service`, enabled |
+| Процессы | главный — `root`, рабочие — `www-data` |
+| Конфигурация ресурса | `/etc/nginx/sites-available/devops-site`, ссылка в `/etc/nginx/sites-enabled/`; стандартный `default` отключён (ссылка удалена, файл сохранён) |
+| Каталог ресурса | `/var/www/devops-site`, владелец `devops:devops`, каталоги `755`, файлы `644` (доставка `scripts/deploy.sh`, rsync `--chmod=D755,F644`) |
+| Сертификат | `/etc/ssl/certs/devops.crt`, `root:root`, `644`; CN и SAN `DNS:devops.local`; срок действия 365 дней (до 20.10.2027) |
+| Закрытый ключ | `/etc/ssl/private/devops.key`, `root:root`, `600` (читает только главный процесс) |
+| Журналы | `/var/log/nginx/devops-site.access.log`, `/var/log/nginx/devops-site.error.log` |
+
+Формирование сертификата:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj "/CN=devops.local" \
+  -addext "subjectAltName=DNS:devops.local"
+```
+
+Создание каталога ресурса:
+
+```bash
+sudo mkdir -p /var/www/devops-site
+sudo chown -R devops:devops /var/www/devops-site
+```
+
+`/etc/nginx/sites-available/devops-site`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+
+    ssl_certificate     /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root /var/www/devops-site;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log  /var/log/nginx/devops-site.error.log;
+}
+```
+
+Применение:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Клиент (хост, WSL): сертификат скопирован в `~/devops.crt` (`scp devops:/etc/ssl/certs/devops.crt ~/devops.crt`), доставка содержимого — `scripts/deploy.sh`.
+
+## 9. Доменное имя
+
+- Хост (Windows): `C:\Windows\System32\drivers\etc\hosts` — `192.168.109.101   devops.local`.
+- Сервер: `/etc/hosts` — `127.0.1.1 devops-vm.devops.local devops-vm`; `hostname -f` → `devops-vm.devops.local`.
+
+## 10. Контроль
+
+`scripts/audit.sh` — 10 проверок: SSH (root, пароли, порт ≠ 22, MaxAuthTries = 3), UFW (активен, deny incoming), веб-сервер (nginx активен, `nginx -t`, срок сертификата ≥ 30 дн., нет файлов с записью для всех и права ключа 600);
 код возврата 0 — все проверки пройдены, 1 — есть нарушения.
