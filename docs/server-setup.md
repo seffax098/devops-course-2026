@@ -114,6 +114,7 @@ disabled (routed); правила: 80/tcp ALLOW IN, 443/tcp ALLOW IN, 2222/tcp L
 | 02-keys-configured | 20.10.2026 14:06 | пользователь devops в группе sudo, ключевая аутентификация, `~/.ssh/config` |
 | 03-ssh-hardened | 20.10.2026 14:11 | 99-hardening.conf, порт 2222, ssh.service, проброс 2222→2222 |
 | 04-nginx-https | 20.10.2026 | ПР6: nginx, ресурс devops-site, HTTPS с самоподписанным сертификатом, перенаправление HTTP → HTTPS |
+| 05-docker-compose | 22.10.2026 | ПР7: Docker Engine, проект ~/app (приложение + PostgreSQL) в docker compose |
 
 ## 8. Веб-сервер
 
@@ -187,12 +188,65 @@ sudo nginx -t && sudo systemctl reload nginx
 
 Клиент (хост, WSL): сертификат скопирован в `~/devops.crt` (`scp devops:/etc/ssl/certs/devops.crt ~/devops.crt`), доставка содержимого — `scripts/deploy.sh`.
 
-## 9. Доменное имя
+## 9. Контейнеризация
+
+| Параметр | Значение |
+|---|---|
+| Docker Engine | из официального репозитория `download.docker.com` (пакеты `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin`), версия 29.9.2, Compose v5.6.1; пакет `docker.io` не используется |
+| Группа `docker` | `devops` (единственный участник; учётная запись имеет право sudo — участник группы docker фактически получает права root) |
+| Проект | `/home/devops/app` (`~/app`), доставляется с хоста: `rsync -avz --delete --exclude=.env app/ devops:app/`; имя проекта Compose — `app` |
+| Сервисы | `app` — образ `devops-app:1.0` (python:3.12-slim, пользователь `app`, gunicorn на 0.0.0.0:5000 внутри контейнера); `db` — `postgres:16-alpine`, healthcheck `pg_isready` |
+| Файл `.env` | `/home/devops/app/.env`, владелец `devops`, права `600`; создаётся только на сервере из `.env.example`, пароль — `openssl rand -hex 16`; в репозиторий не добавляется (`.gitignore`) |
+| Публикуемые порты | `127.0.0.1:5000` → `app:5000`; порт СУБД 5432 не публикуется |
+| Сеть | `app_backend` (bridge), имя `db` разрешается встроенным DNS Docker |
+| Именованный том | `app_db_data` → `/var/lib/postgresql/data` |
+
+Установка Docker Engine:
+
+```bash
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do sudo apt-get remove -y $pkg; done
+sudo apt-get update && sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops      # затем новая SSH-сессия
+```
+Развёртывание проекта:
+
+```bash
+# хост
+rsync -avz --delete --exclude=.env app/ devops:app/
+# сервер
+cd ~/app
+cp .env.example .env && chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+docker compose ps        # db — (healthy)
+```
+
+Обратный прокси — в блоке `server` для `listen 443 ssl` файла `/etc/nginx/sites-available/devops-site` перед `error_page`:
+
+```nginx
+    location /app/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+```
+
+Применение: `sudo nginx -t && sudo systemctl reload nginx`. Приложение доступно по `https://devops.local/app/`, статический ресурс `https://devops.local/` сохраняется.
+
+## 10. Доменное имя
 
 - Хост (Windows): `C:\Windows\System32\drivers\etc\hosts` — `192.168.109.101   devops.local`.
 - Сервер: `/etc/hosts` — `127.0.1.1 devops-vm.devops.local devops-vm`; `hostname -f` → `devops-vm.devops.local`.
 
-## 10. Контроль
+## 11. Контроль
 
-`scripts/audit.sh` — 10 проверок: SSH (root, пароли, порт ≠ 22, MaxAuthTries = 3), UFW (активен, deny incoming), веб-сервер (nginx активен, `nginx -t`, срок сертификата ≥ 30 дн., нет файлов с записью для всех и права ключа 600);
+`scripts/audit.sh` — 14 проверок: SSH (root, пароли, порт ≠ 22, MaxAuthTries = 3), UFW (активен, deny incoming), веб-сервер (nginx активен, `nginx -t`, срок сертификата ≥ 30 дн., нет файлов с записью для всех и права ключа 600), контейнеризация (docker активен, СУБД healthy, порты 5000/5432 только на 127.0.0.1, права `~/app/.env` 600);
 код возврата 0 — все проверки пройдены, 1 — есть нарушения.

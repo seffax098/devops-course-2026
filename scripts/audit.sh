@@ -43,5 +43,14 @@ WW="$(sudo find /var/www/devops-site -perm -o+w | wc -l)"
 check "Нет файлов ресурса с записью для всех; ключ 600" "0 600" \
       "${WW} $(sudo stat -c '%a' /etc/ssl/private/devops.key)"
 
+echo "[5] Контейнеризация"
+APP_DIR="${APP_DIR:-/home/devops/app}"
+check "Служба docker активна" "active" "$(systemctl is-active docker 2>/dev/null)"
+check "Контейнер СУБД в состоянии healthy" "healthy" \
+      "$(sudo docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null)"
+EXPOSED="$(sudo ss -tlnH | awk '{print $4}' | grep -E ':(5000|5432)$' | grep -v '^127\.0\.0\.1:' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+check "Порты 5000 и 5432 прослушиваются только на 127.0.0.1" "" "$EXPOSED"
+check "Права файла ${APP_DIR}/.env равны 600" "600" "$(sudo stat -c '%a' "${APP_DIR}/.env" 2>/dev/null)"
+
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
