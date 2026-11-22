@@ -250,3 +250,41 @@ docker compose ps        # db — (healthy)
 
 `scripts/audit.sh` — 14 проверок: SSH (root, пароли, порт ≠ 22, MaxAuthTries = 3), UFW (активен, deny incoming), веб-сервер (nginx активен, `nginx -t`, срок сертификата ≥ 30 дн., нет файлов с записью для всех и права ключа 600), контейнеризация (docker активен, СУБД healthy, порты 5000/5432 только на 127.0.0.1, права `~/app/.env` 600);
 код возврата 0 — все проверки пройдены, 1 — есть нарушения.
+## 10. Ansible
+
+Проект расположен в `ansible/` репозитория `devops-course-2026`.
+Управляющий узел — Ubuntu в WSL, рабочая копия `~/devops-course-2026-pr11`.
+Управляемый узел — `devops-vm` с Ubuntu Server 24.04 и Host-only адресом `192.168.109.101`.
+
+Первичный доступ задаётся в `inventory/bootstrap.ini` от пользователя `student`.
+Последующие запуски используют `inventory/prod.ini`, пользователя `devops` и ключ `~/.ssh/devops_vm`.
+Открытый ключ устанавливается до отключения парольной аутентификации.
+Учебная настройка `NOPASSWD:ALL` обеспечивает неинтерактивный sudo.
+
+- `base` проверяет ОС, устанавливает базовые зависимости и Docker Engine из официального репозитория.
+- `ssh` создаёт пользователя, устанавливает открытый ключ, настраивает sudo, SSH и UFW.
+- `nginx` настраивает reverse proxy и перезагружает Nginx после `nginx -t`.
+- `app` загружает проверенный образ, управляет контейнером и проверяет HTTP health endpoint.
+
+Образ — `ghcr.io/seffax098/devops-ci-app`.
+Проверенный тег — `f74e9179ce485b68e9a171ac5ee50abefb4984e2`.
+Контейнер публикует порт 5000 только на `127.0.0.1`, Nginx принимает запросы на порту 80.
+Проверка доступности — `GET /health` с ответом `{"status":"ok"}`.
+
+Команды выполняются из каталога `ansible/`.
+
+```bash
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-pass --ask-become-pass
+ansible-playbook site.yml
+ansible-playbook verify.yml
+curl --fail http://192.168.109.101/health
+```
+
+`force_handlers = True` обеспечивает выполнение уведомлённых обработчиков даже при отказе последующей задачи.
+Загрузка нового образа выполняется до изменения контейнера.
+Повторный запуск при отсутствии drift должен завершаться с `changed=0`.
+Пароли и закрытые SSH-ключи хранятся вне репозитория.
+
+Host-only адрес доступен с компьютера владельца VM.
+Для будущего запуска из GitHub Actions потребуется доступный сетевой маршрут до VM.
