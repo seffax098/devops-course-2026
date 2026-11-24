@@ -1,0 +1,6 @@
+---
+app_image: "ghcr.io/seffax098/devops-ci-app"
+app_tag: "f74e9179ce485b68e9a171ac5ee50abefb4984e2"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
